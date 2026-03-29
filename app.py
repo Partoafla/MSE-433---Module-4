@@ -158,6 +158,31 @@ st.markdown("""
     font-size: 12px;
     letter-spacing: 0.3px;
 }
+
+/* ── TEE / anatomy score panels ── */
+.anatomy-score-value {
+    font-size: 48px; font-weight: 300; font-family: monospace;
+    line-height: 1; margin-bottom: 6px;
+}
+.rf-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 7px 0; border-bottom: 1px solid #e5e7eb; font-size: 13px; color: #374151;
+}
+.rf-row:last-child { border-bottom: none; }
+.rf-val { font-family: monospace; font-size: 12px; font-weight: 600; }
+.rf-pill { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 12px; margin-left: 8px; }
+.pill-low  { background:#f0fdf4; color:#16a34a; }
+.pill-mod  { background:#fffbeb; color:#d97706; }
+.pill-high { background:#fef2f2; color:#dc2626; }
+.bmi-flag { font-size: 12px; padding: 6px 12px; border-radius: 6px; margin-top: 6px; display: inline-block; }
+.bmi-normal    { background:#f0fdf4; color:#15803d; border:1px solid #bbf7d0; }
+.bmi-overweight{ background:#fffbeb; color:#b45309; border:1px solid #fde68a; }
+.bmi-obese     { background:#fef2f2; color:#dc2626; border:1px solid #fecaca; }
+.section-divider {
+    font-size: 11px; color: #6b7280; text-transform: uppercase;
+    letter-spacing: 0.8px; font-weight: 700;
+    border-bottom: 2px solid #e5e7eb; padding-bottom: 4px; margin: 18px 0 12px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -367,16 +392,146 @@ if "calc_history" not in st.session_state:
 # ══════════════════════════════════════════════════════════════════════════════
 # RISK ENGINE  (unchanged logic)
 # ══════════════════════════════════════════════════════════════════════════════
-def compute_risk(prior_ablation, anatomy, extra_proc, physician, time_of_day) -> dict:
+# ══════════════════════════════════════════════════════════════════════════════
+# ANATOMY SCORING — ported from AFib React repo (utils.js)
+# Inputs: fossa ovalis (mm), septal angle (°), LA diameter (mm), prior, afib type, bmi, age
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_anatomy_score(fo: float, sa: float, la: float,
+                           prior: bool, afib: str,
+                           bmi: float | None = None,
+                           age: int | None = None) -> dict:
+    """
+    Composite anatomical risk score (0–100) combining TEE measurements,
+    clinical history, BMI, and age. Ported + extended from the AFib React repo.
+    Returns score, TSP difficulty level, and per-factor breakdown.
+    """
+    # Fossa ovalis thickness — main driver of TSP difficulty
+    # Normal: 1.0–2.5 mm | Elevated: 2.5–3.5 mm | High: >3.5 mm
+    fo_score = round(((fo - 1.0) / 5.0) * 30)          # 0–30 pts
+
+    # Septal angle — unusual angle makes needle approach harder
+    sa_score = 22 if sa > 85 else (12 if sa < 55 else 5)
+
+    # Left atrial diameter — larger LA = more mapping complexity + more ablation sites
+    la_score = 20 if la > 50 else (10 if la > 42 else 3)
+
+    # Prior ablation — scar tissue significantly raises TSP difficulty
+    prior_score = 18 if prior else 0
+
+    # AFib type — persistent/long-standing usually requires additional lesion sets
+    afib_map = {"Paroxysmal": 0, "Persistent": 10, "Long-Standing Persistent": 18}
+    afib_score = afib_map.get(afib, 0)
+
+    # BMI — obesity proxy for access difficulty and prep time (guest lecture)
+    bmi_score = 0
+    bmi_flag  = "Normal"
+    if bmi is not None and bmi > 0:
+        if bmi >= 35:
+            bmi_score = 10; bmi_flag = "Obese (Class II+)"
+        elif bmi >= 30:
+            bmi_score = 6;  bmi_flag = "Obese (Class I)"
+        elif bmi >= 25:
+            bmi_score = 3;  bmi_flag = "Overweight"
+        else:
+            bmi_flag = "Normal"
+
+    # Age — older patients have higher procedural risk and longer recovery
+    age_score = 0
+    if age is not None and age > 0:
+        if age >= 80:   age_score = 8
+        elif age >= 70: age_score = 5
+        elif age >= 60: age_score = 2
+
+    raw = fo_score + sa_score + la_score + prior_score + afib_score + bmi_score + age_score + 5
+    score = min(100, raw)
+
+    # TSP difficulty from imaging measurements (matches AFib repo logic)
+    if fo > 3.5 or sa > 85 or prior:
+        tsp_difficulty = "High"
+        tsp_pred_text  = "12–25+ min"
+        tsp_body = (
+            "Thick fossa ovalis or unusual septal angle detected. "
+            "Recommend: first case of day, most experienced physician, "
+            "RF needle + ICE echo guidance ready before incision."
+        )
+    elif fo > 2.5 or sa > 75:
+        tsp_difficulty = "Medium"
+        tsp_pred_text  = "6–12 min"
+        tsp_body = (
+            "Fossa ovalis slightly thickened. "
+            "Standard needle approach with ICE guidance on standby. "
+            "Recommend scheduling as 2nd case of day."
+        )
+    else:
+        tsp_difficulty = "Low"
+        tsp_pred_text  = "2–6 min"
+        tsp_body = (
+            "Normal septal anatomy detected. "
+            "Routine approach. No special preparation needed."
+        )
+
+    return {
+        "score":          score,
+        "tsp_difficulty": tsp_difficulty,
+        "tsp_pred_text":  tsp_pred_text,
+        "tsp_body":       tsp_body,
+        "bmi_flag":       bmi_flag,
+        "breakdown": {
+            "Fossa ovalis thickness":   fo_score,
+            "Septal angle":             sa_score,
+            "Left atrial diameter":     la_score,
+            "Prior ablation":           prior_score,
+            "AFib type":                afib_score,
+            "BMI":                      bmi_score,
+            "Age":                      age_score,
+        },
+    }
+
+
+def riskLevel_anatomy(score: int) -> str:
+    if score >= 65: return "High"
+    if score >= 35: return "Moderate"
+    return "Low"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RISK ENGINE — OLS model (unchanged) + anatomy augmentation
+# ══════════════════════════════════════════════════════════════════════════════
+def compute_risk(prior_ablation, anatomy, extra_proc, physician, time_of_day,
+                 fo=2.5, sa=70, la=40, afib_type="Paroxysmal",
+                 bmi=None, age=None) -> dict:
+    """
+    Extended risk function. Combines:
+      - OLS regression model (trained on 145 cases) → predicted duration + CI
+      - Anatomical score (TEE measurements, BMI, age) → composite 0-100 score
+      - Scheduling logic from original Streamlit app (unchanged)
+    """
     md = MODEL_DATA
 
-    tsp_base = {"Simple": BMK["tsp_p25"], "Moderate": BMK["tsp_med"], "Complex": BMK["tsp_p75"]}[anatomy]
-    tsp_est  = tsp_base + (8.0 if prior_ablation == "Yes" else 0.0)
-    tsp_est  = min(tsp_est, BMK["steps"]["TSP"]["max"])
+    # ── OLS prediction (original logic preserved exactly) ──
+    prior_bool = prior_ablation == "Yes"
+    tsp_base   = {"Simple": BMK["tsp_p25"], "Moderate": BMK["tsp_med"], "Complex": BMK["tsp_p75"]}[anatomy]
+    tsp_est    = tsp_base + (8.0 if prior_bool else 0.0)
+    tsp_est    = min(tsp_est, BMK["steps"]["TSP"]["max"])
 
+    # If TEE measurements available, refine TSP estimate from actual fossa ovalis thickness
+    if fo != 2.5 or sa != 70:   # non-default → user entered real measurements
+        if fo > 3.5 or sa > 85 or prior_bool:
+            tsp_est = max(tsp_est, BMK["tsp_p75"] + (8.0 if prior_bool else 0.0))
+        elif fo > 2.5 or sa > 75:
+            tsp_est = max(tsp_est, BMK["tsp_med"])
+
+    # BMI → adjust PT_PREP estimate
     phys_fm  = BMK["physician_feature_means"][physician]
     n_abl    = phys_fm["N_ABL"]
     pt_prep  = phys_fm["PT_PREP"]
+    if bmi is not None and bmi >= 35:
+        pt_prep += 10      # obese: significant positioning difficulty (guest lecture)
+    elif bmi is not None and bmi >= 30:
+        pt_prep += 5
+    elif bmi is not None and bmi >= 25:
+        pt_prep += 2
 
     extra_flag = 0.0 if extra_proc == "None — Standard PVI Only" else 1.0
     phys_enc   = float(PHYS_MAP[physician])
@@ -390,12 +545,17 @@ def compute_risk(prior_ablation, anatomy, extra_proc, physician, time_of_day) ->
 
     risk = "Low" if predicted < BMK["p50"] else ("Medium" if predicted < BMK["p75"] else "High")
 
+    # ── Anatomy score (new — from AFib repo) ──
+    anat = compute_anatomy_score(fo, sa, la, prior_bool, afib_type, bmi, age)
+    anat_level = riskLevel_anatomy(anat["score"])
+
+    # ── Risk drivers ──
     score   = 0
     drivers = []
 
-    if prior_ablation == "Yes":
+    if prior_bool:
         score += 1
-        drivers.append(f"Prior ablation — estimated TSP raised to {tsp_est:.0f} min (scar tissue effect).")
+        drivers.append(f"Prior ablation — TSP raised to {tsp_est:.0f} min (scar tissue effect).")
 
     if anatomy == "Moderate":
         score += 1
@@ -403,6 +563,45 @@ def compute_risk(prior_ablation, anatomy, extra_proc, physician, time_of_day) ->
     elif anatomy == "Complex":
         score += 2
         drivers.append(f"Complex anatomy — TSP estimated at {tsp_est:.0f} min (historical 75th percentile).")
+
+    # TEE-derived drivers
+    if fo > 3.5:
+        drivers.append(f"Fossa ovalis {fo:.1f} mm — thick septum significantly increases TSP difficulty.")
+    elif fo > 2.5:
+        drivers.append(f"Fossa ovalis {fo:.1f} mm — mildly thickened; monitor TSP duration carefully.")
+    if sa > 85:
+        drivers.append(f"Septal angle {sa}° — unusual angle expected to complicate needle approach.")
+    if la > 50:
+        drivers.append(f"Left atrial diameter {la} mm — enlarged LA may require additional ablation sites.")
+    elif la > 42:
+        drivers.append(f"Left atrial diameter {la} mm — borderline enlarged; watch pre-map duration.")
+
+    # AFib type
+    afib_drivers = {
+        "Persistent":             "Persistent AFib — additional lesion sets (BOX/PST BOX) likely; increases ablation time.",
+        "Long-Standing Persistent":"Long-standing persistent AFib — highest complexity; plan for extended ablation duration.",
+    }
+    if afib_type in afib_drivers:
+        score += 1 if afib_type == "Persistent" else 2
+        drivers.append(afib_drivers[afib_type])
+
+    # BMI
+    if bmi is not None and bmi >= 35:
+        score += 2
+        drivers.append(f"BMI {bmi:.0f} — Class II+ obesity. Expect extended PT prep (+10 min est.) and access difficulty.")
+    elif bmi is not None and bmi >= 30:
+        score += 1
+        drivers.append(f"BMI {bmi:.0f} — Class I obesity. Prep time adjustment applied (+5 min est.).")
+    elif bmi is not None and bmi >= 25:
+        drivers.append(f"BMI {bmi:.0f} — overweight. Minor prep adjustment applied (+2 min est.).")
+
+    # Age
+    if age is not None and age >= 80:
+        score += 2
+        drivers.append(f"Age {age} — elevated procedural risk; longer post-care and recovery monitoring expected.")
+    elif age is not None and age >= 70:
+        score += 1
+        drivers.append(f"Age {age} — slightly increased monitoring time expected in post-care.")
 
     extra_scores = {"CTI Ablation": 1, "BOX Isolation": 2, "SVC Isolation": 2, "Multiple Extra Procedures": 3}
     if extra_proc in extra_scores:
@@ -416,7 +615,9 @@ def compute_risk(prior_ablation, anatomy, extra_proc, physician, time_of_day) ->
         score += 1
         drivers.append("Afternoon slot — elevated overrun risk regardless of predicted duration.")
 
-    tsp_s = {"Simple": 0, "Moderate": 1, "Complex": 2}[anatomy] + (1 if prior_ablation == "Yes" else 0)
+    # TSP label for display
+    tsp_s     = {"Simple": 0, "Moderate": 1, "Complex": 2}[anatomy] + (1 if prior_bool else 0)
+    if fo > 3.5 or sa > 85: tsp_s = max(tsp_s, 2)
     tsp_label = {0: "Low (2–8 min)", 1: "Moderate (8–20 min)"}.get(tsp_s, "High (15–37 min)")
 
     sched_map = {
@@ -430,9 +631,24 @@ def compute_risk(prior_ablation, anatomy, extra_proc, physician, time_of_day) ->
     sched_rec = sched_map.get((risk, time_of_day), "Refer to scheduling coordinator.")
 
     return {
-        "score": score, "risk": risk, "lo": lo, "hi": hi, "center": predicted,
-        "tsp_label": tsp_label, "tsp_est": tsp_est, "sched_rec": sched_rec,
-        "drivers": drivers, "r2": md["r2"],
+        "score":      score,
+        "risk":       risk,
+        "lo":         lo,
+        "hi":         hi,
+        "center":     predicted,
+        "tsp_label":  tsp_label,
+        "tsp_est":    tsp_est,
+        "sched_rec":  sched_rec,
+        "drivers":    drivers,
+        "r2":         md["r2"],
+        # New anatomy fields
+        "anatomy_score":  anat["score"],
+        "anatomy_level":  anat_level,
+        "tsp_difficulty": anat["tsp_difficulty"],
+        "tsp_pred_text":  anat["tsp_pred_text"],
+        "tsp_body":       anat["tsp_body"],
+        "bmi_flag":       anat.get("bmi_flag", ""),
+        "anat_breakdown": anat["breakdown"],
     }
 
 
@@ -514,8 +730,8 @@ def duration_gauge(predicted: float, lo: float, hi: float) -> go.Figure:
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab_risk, tab_schedule, tab_debrief = st.tabs([
-    "Pre-Case Risk Score", "OR Day Schedule Builder", "Post-Case Debrief"
+tab_risk, tab_schedule, tab_debrief, tab_audio = st.tabs([
+    "Pre-Case Risk Score", "OR Day Schedule Builder", "Post-Case Debrief", "Audio Insights ✦ Prototype"
 ])
 
 
@@ -526,9 +742,9 @@ with tab_risk:
     st.markdown("<div class='page-title'>Pre-Case Risk Score</div>", unsafe_allow_html=True)
     st.markdown(
         "<div class='page-subtitle'>"
-        "Enter patient and procedure details before a case begins. Duration is predicted using "
-        "a linear regression model trained on the EP Lab dataset. Risk level is determined by "
-        "where the predicted duration falls in the historical distribution of case times."
+        "Enter patient details and TEE imaging measurements to generate a pre-case risk assessment. "
+        "The OLS model (R²=0.49, n=145 cases) predicts case duration. "
+        "TEE measurements produce a separate anatomical difficulty score."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -540,197 +756,492 @@ with tab_risk:
     col_form, col_result = st.columns([1, 1.2], gap="large")
 
     with col_form:
-        st.markdown("<div class='step-label'>Step 1 — Enter Case Details</div>", unsafe_allow_html=True)
+
+        # ── Patient demographics ──────────────────────────────────────────────
+        st.markdown("<div class='section-divider'>Patient demographics</div>", unsafe_allow_html=True)
         with st.container(border=True):
-            prior_ablation = st.radio("Prior ablation?", ["No", "Yes"], horizontal=True, key="risk_prior")
-            anatomy        = st.select_slider(
-                "Heart anatomy complexity (from imaging)",
-                options=["Simple", "Moderate", "Complex"], value="Moderate", key="risk_anatomy",
+            d1, d2 = st.columns(2)
+            patient_first = d1.text_input("First name", placeholder="e.g. Maria", key="risk_first")
+            patient_last  = d2.text_input("Last name",  placeholder="e.g. Okonkwo", key="risk_last")
+            d3, d4, d5 = st.columns(3)
+            patient_dob = d3.date_input("Date of birth", value=None, key="risk_dob",
+                                        help="Used to calculate age automatically.")
+            patient_mrn = d4.text_input("MRN", placeholder="e.g. 2026-0412", key="risk_mrn")
+            # Derive age from DOB; fall back to manual entry if DOB not set
+            if patient_dob is not None:
+                from datetime import date as _date
+                patient_age = (_date.today() - patient_dob).days // 365
+                d5.metric("Age", f"{patient_age} yrs", help="Calculated from date of birth.")
+            else:
+                patient_age = d5.number_input("Age (if DOB unknown)", min_value=18,
+                                              max_value=99, value=65, step=1, key="risk_age")
+            patient_label = st.text_input(
+                "Case label (optional)",
+                placeholder="e.g. Pt 001 — appears in history log",
+                key="risk_label"
             )
-            extra_proc = st.selectbox(
+
+        # ── Scheduling ────────────────────────────────────────────────────────
+        st.markdown("<div class='section-divider'>Scheduling</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            s1, s2, s3 = st.columns(3)
+            physician   = s1.selectbox("Physician", ["Dr. A", "Dr. B", "Dr. C"], key="risk_phys")
+            sched_time  = s2.time_input("Scheduled time", key="risk_time")
+            time_of_day = s3.radio("Time of day", ["Morning", "Afternoon"], horizontal=True, key="risk_tod")
+
+        # ── Clinical profile ──────────────────────────────────────────────────
+        st.markdown("<div class='section-divider'>Clinical profile</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            c1, c2 = st.columns(2)
+            afib_type = c1.selectbox(
+                "AFib type",
+                ["Paroxysmal", "Persistent", "Long-Standing Persistent"],
+                key="risk_afib",
+                help="Persistent/long-standing AFib typically requires additional lesion sets beyond standard PVI."
+            )
+            prior_ablation = c2.radio(
+                "Prior ablation?", ["No", "Yes"], horizontal=True, key="risk_prior",
+                help="Redo cases have scar tissue that significantly raises TSP difficulty."
+            )
+            c3, c4 = st.columns(2)
+            extra_proc = c3.selectbox(
                 "Extra procedure planned?",
                 ["None — Standard PVI Only", "CTI Ablation", "BOX Isolation",
                  "SVC Isolation", "Multiple Extra Procedures"],
                 key="risk_extra",
+                help="Any additional ablation target beyond standard pulmonary vein isolation."
             )
-            physician   = st.selectbox("Performing physician", ["Dr. A", "Dr. B", "Dr. C"], key="risk_phys")
-            time_of_day = st.radio("Time of day", ["Morning", "Afternoon"], horizontal=True, key="risk_tod")
-            patient_label = st.text_input("Patient or case label (optional)", placeholder="e.g. Pt 001", key="risk_label")
-
-            st.markdown("<br>", unsafe_allow_html=True)
-            calc_clicked = st.button("Calculate Risk", type="primary", use_container_width=True)
-            st.markdown('<span class="ghost-btn-marker"></span>', unsafe_allow_html=True)
-            add_sched = st.button(
-                "Add to Day Schedule",
-                use_container_width=True,
-                disabled=st.session_state.risk_result is None,
+            bmi_val = c4.number_input(
+                "BMI (optional)",
+                min_value=0.0, max_value=70.0, value=0.0, step=0.5, key="risk_bmi",
+                help="Used to flag access difficulty and adjust prep time estimate. Not in current dataset."
             )
-            st.markdown(
-                "<p class='helper-text'>Add to Day Schedule is only available after calculating risk.</p>",
-                unsafe_allow_html=True,
+            bmi_input = bmi_val if bmi_val > 0 else None
+            clinical_notes = st.text_area(
+                "Clinical notes (optional)",
+                placeholder="e.g. Difficult venous access history. Active cold flagged. Anticoagulation managed.",
+                height=72, key="risk_notes"
             )
 
-    # Compute only on button click; persist result in session state
+        # ── TEE ultrasound measurements ───────────────────────────────────────
+        st.markdown("<div class='section-divider'>TEE ultrasound measurements</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='font-size:12px;color:#6b7280;margin:-6px 0 10px'>From pre-procedure imaging. "
+            "These drive the TSP difficulty prediction and anatomical risk score. "
+            "Leave at defaults if imaging is not yet available — confidence will be lower.</p>",
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            fo_val = st.slider(
+                "Fossa ovalis thickness (mm)",
+                min_value=1.0, max_value=6.0, value=2.5, step=0.1, key="risk_fo",
+                help="Normal: 1.0–2.5 mm · Elevated: 2.5–3.5 mm · High risk: >3.5 mm"
+            )
+            sa_val = st.slider(
+                "Septal angle (°)",
+                min_value=40, max_value=110, value=70, step=1, key="risk_sa",
+                help="Normal: 55–80° · Difficult: >85°"
+            )
+            la_val = st.slider(
+                "Left atrial diameter (mm)",
+                min_value=30, max_value=65, value=40, step=1, key="risk_la",
+                help="Normal: <40 mm · Borderline: 40–50 mm · Enlarged: >50 mm"
+            )
+
+            # Inline measurement summary
+            fo_flag = "high" if fo_val > 3.5 else ("mod" if fo_val > 2.5 else "low")
+            sa_flag = "high" if sa_val > 85 else ("mod" if sa_val < 55 else "low")
+            la_flag = "high" if la_val > 50 else ("mod" if la_val > 42 else "low")
+            pill_css = {"low": "pill-low", "mod": "pill-mod", "high": "pill-high"}
+            fo_txt = "High risk" if fo_val > 3.5 else ("Elevated" if fo_val > 2.5 else "Normal")
+            sa_txt = "Difficult" if sa_val > 85 else ("Steep" if sa_val < 55 else "Normal")
+            la_txt = "Enlarged" if la_val > 50 else ("Borderline" if la_val > 42 else "Normal")
+
+            tc1, tc2, tc3 = st.columns(3)
+            tc1.markdown(
+                f"<div style='font-size:11px;color:#6b7280;margin-bottom:2px'>Fossa ovalis</div>"
+                f"<div style='font-size:14px;font-weight:600'>{fo_val:.1f} mm "
+                f"<span class='rf-pill {pill_css[fo_flag]}'>{fo_txt}</span></div>",
+                unsafe_allow_html=True
+            )
+            tc2.markdown(
+                f"<div style='font-size:11px;color:#6b7280;margin-bottom:2px'>Septal angle</div>"
+                f"<div style='font-size:14px;font-weight:600'>{sa_val}° "
+                f"<span class='rf-pill {pill_css[sa_flag]}'>{sa_txt}</span></div>",
+                unsafe_allow_html=True
+            )
+            tc3.markdown(
+                f"<div style='font-size:11px;color:#6b7280;margin-bottom:2px'>Left atrium</div>"
+                f"<div style='font-size:14px;font-weight:600'>{la_val} mm "
+                f"<span class='rf-pill {pill_css[la_flag]}'>{la_txt}</span></div>",
+                unsafe_allow_html=True
+            )
+
+        # ── Derive anatomy level from TEE for OLS model ───────────────────────
+        # Anatomy complexity slider removed — TEE measurements are the single source of truth
+        if fo_val > 3.5 or sa_val > 85:
+            anatomy = "Complex"
+        elif fo_val > 2.5 or sa_val > 75:
+            anatomy = "Moderate"
+        else:
+            anatomy = "Simple"
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        st.markdown("<br>", unsafe_allow_html=True)
+        calc_clicked = st.button("Calculate Risk", type="primary", use_container_width=True)
+        st.markdown('<span class="ghost-btn-marker"></span>', unsafe_allow_html=True)
+        add_sched = st.button(
+            "Add to Day Schedule",
+            use_container_width=True,
+            disabled=st.session_state.risk_result is None,
+        )
+        st.markdown(
+            "<p class='helper-text'>Add to Day Schedule is only available after calculating risk.</p>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Compute on click ──────────────────────────────────────────────────────
     if calc_clicked:
-        result = compute_risk(prior_ablation, anatomy, extra_proc, physician, time_of_day)
+        result = compute_risk(
+            prior_ablation, anatomy, extra_proc, physician, time_of_day,
+            fo=fo_val, sa=sa_val, la=la_val,
+            afib_type=afib_type, bmi=bmi_input, age=int(patient_age)
+        )
         st.session_state.risk_result = result
         st.session_state.risk_inputs = {
             "physician": physician, "anatomy": anatomy, "extra_proc": extra_proc,
             "prior": prior_ablation, "time_of_day": time_of_day,
+            "fo": fo_val, "sa": sa_val, "la": la_val,
+            "afib_type": afib_type, "bmi": bmi_input, "age": int(patient_age),
         }
+        name_str = f"{patient_first} {patient_last}".strip() or "—"
         lbl = patient_label.strip() or f"Calculation {len(st.session_state.calc_history) + 1}"
         st.session_state.calc_history.append({
-            "Label":      lbl,
-            "Physician":  physician,
-            "Anatomy":    anatomy,
-            "Extra Proc": extra_proc.replace("None — Standard PVI Only", "Standard PVI"),
-            "Prior Abl.": prior_ablation,
-            "Risk":       result["risk"],
-            "Duration":   f"{result['lo']:.0f}–{result['hi']:.0f} min",
+            "Label":       lbl,
+            "Patient":     name_str,
+            "MRN":         patient_mrn or "—",
+            "Age":         int(patient_age),
+            "Physician":   physician,
+            "AFib Type":   afib_type,
+            "Extra Proc":  extra_proc.replace("None — Standard PVI Only", "Standard PVI"),
+            "Prior Abl.":  prior_ablation,
+            "BMI":         f"{bmi_input:.0f}" if bmi_input else "—",
+            "FO (mm)":     f"{fo_val:.1f}",
+            "SA (°)":      str(sa_val),
+            "LA (mm)":     str(la_val),
+            "Sched. Risk": result["risk"],
+            "Anat. Score": result["anatomy_score"],
+            "TSP Pred.":   result["tsp_difficulty"],
+            "Duration":    f"{result['lo']:.0f}–{result['hi']:.0f} min",
         })
 
     r = st.session_state.risk_result
 
+    # ── Results column ────────────────────────────────────────────────────────
     with col_result:
-        st.markdown("<div class='step-label'>Step 2 — Review Assessment</div>", unsafe_allow_html=True)
-        with st.container(border=True):
-            if r is None:
+        if r is None:
+            st.markdown(
+                "<div style='display:flex;align-items:center;justify-content:center;"
+                "min-height:500px;text-align:center;color:#9ca3af;'>"
+                "<div><div style='font-size:32px;margin-bottom:14px'>📋</div>"
+                "<div style='font-size:15px;line-height:1.7'>"
+                "Complete the form and click<br><b>Calculate Risk</b> to see the assessment."
+                "</div></div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            risk_color = RISK_COLORS[r["risk"]]
+            anat_color = {"Low": GREEN, "Moderate": ORANGE, "High": RED}[r["anatomy_level"]]
+            tsp_color  = {"Low": GREEN, "Medium": ORANGE, "High": RED}[r["tsp_difficulty"]]
+
+            # ══════════════════════════════════════════════════════════════════
+            # GROUP 1 — SCHEDULING RISK (OLS model output)
+            # ══════════════════════════════════════════════════════════════════
+            st.markdown(
+                "<div style='font-size:11px;font-weight:700;color:#6b7280;"
+                "text-transform:uppercase;letter-spacing:.08em;"
+                "border-bottom:2px solid #e5e7eb;padding-bottom:5px;margin-bottom:12px'>"
+                "Scheduling risk — OLS model</div>",
+                unsafe_allow_html=True,
+            )
+            with st.container(border=True):
+
+                # Overall risk verdict
+                risk_bg  = {"Low":"#f0fdf4","Medium":"#fffbeb","High":"#fef2f2"}[r["risk"]]
+                risk_bdr = {"Low":"#22c55e","Medium":"#f59e0b","High":"#ef4444"}[r["risk"]]
+                risk_sub = {
+                    "Low":    "Predicted duration below historical median — fits standard slot.",
+                    "Medium": "Predicted duration between 50th–75th percentile — add buffer time.",
+                    "High":   "Predicted duration above 75th percentile — extended slot required.",
+                }[r["risk"]]
                 st.markdown(
-                    "<div style='display:flex;align-items:center;justify-content:center;"
-                    "min-height:420px;text-align:center;color:#9ca3af;'>"
-                    "<div style='font-size:15px;line-height:1.7'>"
-                    "Complete the form and click <b>Calculate Risk</b><br>to see the prediction."
-                    "</div></div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                # ── Risk badge ──
-                risk_color = RISK_COLORS[r["risk"]]
-                st.markdown(
-                    f"<div class='risk-{r['risk'].lower()}'>"
-                    f"<div style='font-size:26px;font-weight:700;color:{risk_color}'>{r['risk']} Risk</div>"
-                    f"<div style='font-size:13px;color:#374151;margin-top:4px'>"
-                    f"Predicted duration is "
-                    f"{'below the historical median' if r['risk'] == 'Low' else 'between the 50th and 75th percentile' if r['risk'] == 'Medium' else 'above the 75th percentile'}"
-                    f"</div></div>",
+                    f"<div style='background:{risk_bg};border:1.5px solid {risk_bdr};"
+                    f"border-radius:8px;padding:14px 18px;margin-bottom:14px'>"
+                    f"<div style='font-size:22px;font-weight:700;color:{risk_color}'>"
+                    f"{r['risk']} Overrun Risk</div>"
+                    f"<div style='font-size:13px;color:#374151;margin-top:4px'>{risk_sub}</div>"
+                    f"</div>",
                     unsafe_allow_html=True,
                 )
 
-                # ── Duration gauge ──
-                st.markdown("<div class='result-spacer'></div>", unsafe_allow_html=True)
-                st.markdown("**Predicted Duration vs Historical Distribution**")
+                # Duration gauge
+                st.markdown(
+                    "<div style='font-size:12px;font-weight:600;color:#374151;"
+                    "margin-bottom:4px'>Predicted duration vs historical distribution</div>",
+                    unsafe_allow_html=True,
+                )
                 st.plotly_chart(
                     duration_gauge(r["center"], r["lo"], r["hi"]),
                     use_container_width=True, config={"displayModeBar": False},
                 )
 
-                # ── KPI cards ──
-                st.markdown("<div class='result-spacer'></div>", unsafe_allow_html=True)
-                m1, m2 = st.columns(2)
-                m1.markdown(kpi_card("Predicted Duration", f"{r['lo']:.0f}–{r['hi']:.0f} min", BLUE),
-                            unsafe_allow_html=True)
-                m2.markdown(kpi_card("TSP Difficulty", r["tsp_label"], BLUE),
-                            unsafe_allow_html=True)
+                # Duration + scheduling KPIs
+                kc1, kc2 = st.columns(2)
+                kc1.markdown(
+                    kpi_card("Predicted duration", f"{r['lo']:.0f}–{r['hi']:.0f} min", risk_color),
+                    unsafe_allow_html=True
+                )
+                kc2.markdown(
+                    kpi_card("Recommended slot",
+                             "60 min" if r["center"] < 60 else ("90 min" if r["center"] < 80 else "120 min"),
+                             NAVY),
+                    unsafe_allow_html=True
+                )
 
-                # ── Scheduling recommendation ──
-                st.markdown("<div class='result-spacer'></div>", unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Scheduling recommendation
+                sched_bg  = "#fffbeb"
+                sched_bdr = "#f59e0b"
+                if r["risk"] == "Low":   sched_bg, sched_bdr = "#f0fdf4", "#22c55e"
+                if r["risk"] == "High":  sched_bg, sched_bdr = "#fef2f2", "#ef4444"
                 st.markdown(
-                    f"<div class='box-yellow'><b>Scheduling recommendation:</b> {r['sched_rec']}</div>",
+                    f"<div style='background:{sched_bg};border-left:4px solid {sched_bdr};"
+                    f"border-radius:0 6px 6px 0;padding:12px 16px'>"
+                    f"<div style='font-size:11px;font-weight:700;color:#6b7280;"
+                    f"text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px'>"
+                    f"Scheduling recommendation</div>"
+                    f"<div style='font-size:13px;color:#1c1917'>{r['sched_rec']}</div>"
+                    f"</div>",
                     unsafe_allow_html=True,
                 )
 
-                # ── Risk drivers ──
-                st.markdown("<div class='result-spacer'></div>", unsafe_allow_html=True)
-                st.markdown("**Risk Drivers**")
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Risk drivers
+                st.markdown(
+                    "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:6px'>"
+                    "Risk drivers</div>",
+                    unsafe_allow_html=True,
+                )
                 if r["drivers"]:
                     for d in r["drivers"]:
                         st.markdown(f"- {d}")
                 else:
                     st.markdown(
-                        "<div class='box-green'>No significant risk factors identified.</div>",
+                        "<div style='font-size:13px;color:#16a34a'>No significant risk factors identified.</div>",
                         unsafe_allow_html=True,
                     )
 
-                # ── Model expander ──
-                st.markdown("<div class='result-spacer'></div>", unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # ── How this prediction works (OLS model) ─────────────────────
                 with st.expander("How this prediction works"):
-                    md   = MODEL_DATA
-                    coef = md["coefs"]
-                    intc = md["intercept"]
-                    r2_val = md["r2"]
+                    md_  = MODEL_DATA
+                    coef = md_["coefs"]
+                    r2_v = md_["r2"]
                     st.markdown(
                         f"<p style='font-size:12px;color:{GREY};margin:0 0 10px'>"
-                        f"R\u00b2 = {r2_val:.3f} \u2014 the model explains {r2_val*100:.0f}% of case time variance. "
-                        f"Remaining variance is driven by unobserved factors like patient anatomy and team coordination."
-                        f" | Trained on {md['n_train']} cases.</p>",
+                        f"R² = {r2_v:.3f} — the OLS model explains {r2_v*100:.0f}% of case time variance. "
+                        f"Remaining variance reflects unobserved factors: staff composition, equipment status, "
+                        f"PACU availability, patient anatomy not captured in the dataset."
+                        f" | Trained on {md_['n_train']} cases.</p>",
                         unsafe_allow_html=True,
                     )
-                    signs = [("+" if c >= 0 else "\u2212") for c in coef]
+                    signs = [("+" if c >= 0 else "−") for c in coef]
                     terms = "  ".join(
-                        f"{s} {abs(c):.2f}\u00d7({n})"
-                        for s, c, n in zip(signs, coef, md["feat_display"])
+                        f"{s} {abs(c):.2f}×({n})"
+                        for s, c, n in zip(signs, coef, md_["feat_display"])
                     )
-                    eq = f"Predicted PT_IN_OUT = {intc:.1f}  {terms}"
-                    st.markdown(f"<div class='eq-box'>{eq}</div>", unsafe_allow_html=True)
+                    st.markdown(
+                        f"<div class='eq-box'>Predicted PT_IN_OUT = {md_['intercept']:.1f}  {terms}</div>",
+                        unsafe_allow_html=True,
+                    )
                     st.markdown("**What each coefficient means:**")
                     for exp in [
-                        f"Ablation Sites ({coef[0]:+.2f} min/site): each additional site adds {abs(coef[0]):.2f} min.",
-                        f"TSP Duration ({coef[1]:+.2f} min/min): each extra minute in TSP flows through to total time — the largest source of variability.",
-                        f"Physician ({coef[2]:+.2f} min/unit): encodes Dr. A=0, Dr. B=1, Dr. C=2; reflects case mix differences, not performance.",
-                        f"Patient Prep ({coef[3]:+.2f} min/min): extra prep time cascades into overall duration.",
-                        f"Extra Procedure ({coef[4]:+.2f} min): having any extra procedure adds an average of {abs(coef[4]):.0f} min.",
+                        f"N_ABL ({coef[0]:+.2f} min/site): each extra ablation site ≈ {abs(coef[0]):.1f} min.",
+                        f"TSP ({coef[1]:+.2f} min/min): each extra TSP minute cascades into total time — largest variability source.",
+                        f"Physician ({coef[2]:+.2f} min/unit): A=0, B=1, C=2; captures workflow differences.",
+                        f"PT Prep ({coef[3]:+.2f} min/min): extra prep time (e.g. obesity) propagates into duration.",
+                        f"Extra Proc ({coef[4]:+.2f} min): any extra ablation target adds ~{abs(coef[4]):.0f} min average.",
                     ]:
                         st.markdown(f"- {exp}")
                     st.markdown(
-                        f"<div class='box-orange' style='font-size:12px'>"
-                        f"This model is trained on {md['n_train']} cases from a single EP Lab centre. "
-                        f"For planning guidance only — not for clinical decision-making."
+                        "<div class='box-orange' style='font-size:12px;margin-top:10px'>"
+                        "The anatomical risk score (0–100) is a separate composite index from TEE measurements, "
+                        "BMI, and age. It is not part of the OLS model and does not affect the duration prediction — "
+                        "it provides clinical context for procedural difficulty."
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # ══════════════════════════════════════════════════════════════════
+            # GROUP 2 — ANATOMICAL ASSESSMENT (TEE measurements)
+            # ══════════════════════════════════════════════════════════════════
+            st.markdown(
+                "<div style='font-size:11px;font-weight:700;color:#6b7280;"
+                "text-transform:uppercase;letter-spacing:.08em;"
+                "border-bottom:2px solid #e5e7eb;padding-bottom:5px;margin-bottom:12px'>"
+                "Anatomical assessment — TEE measurements</div>",
+                unsafe_allow_html=True,
+            )
+            with st.container(border=True):
+
+                # Anatomy score + TSP side by side
+                ac1, ac2 = st.columns(2)
+
+                # Anatomy score card
+                anat_bg  = {"Low":"#f0fdf4","Moderate":"#fffbeb","High":"#fef2f2"}[r["anatomy_level"]]
+                anat_bdr = {"Low":"#22c55e","Moderate":"#f59e0b","High":"#ef4444"}[r["anatomy_level"]]
+                ac1.markdown(
+                    f"<div style='background:{anat_bg};border:1.5px solid {anat_bdr};"
+                    f"border-radius:8px;padding:14px 16px;height:100%'>"
+                    f"<div style='font-size:11px;font-weight:700;color:#6b7280;"
+                    f"text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px'>"
+                    f"Anatomical risk score</div>"
+                    f"<div style='font-size:40px;font-weight:700;color:{anat_color};"
+                    f"line-height:1;margin-bottom:4px'>{r['anatomy_score']}"
+                    f"<span style='font-size:18px;font-weight:400;color:#6b7280'> / 100</span></div>"
+                    f"<div style='font-size:13px;font-weight:600;color:{anat_color}'>"
+                    f"{r['anatomy_level']} anatomical risk</div>"
+                    f"<div style='background:#e5e7eb;border-radius:3px;height:5px;"
+                    f"overflow:hidden;margin-top:8px'>"
+                    f"<div style='background:{anat_color};width:{r['anatomy_score']}%;height:100%'>"
+                    f"</div></div></div>",
+                    unsafe_allow_html=True,
+                )
+
+                # TSP difficulty card
+                tsp_bg  = {"Low":"#f0fdf4","Medium":"#fffbeb","High":"#fef2f2"}[r["tsp_difficulty"]]
+                tsp_bdr = {"Low":"#22c55e","Medium":"#f59e0b","High":"#ef4444"}[r["tsp_difficulty"]]
+                tsp_pct = {"Low": 22, "Medium": 55, "High": 88}[r["tsp_difficulty"]]
+                ac2.markdown(
+                    f"<div style='background:{tsp_bg};border:1.5px solid {tsp_bdr};"
+                    f"border-radius:8px;padding:14px 16px;height:100%'>"
+                    f"<div style='font-size:11px;font-weight:700;color:#6b7280;"
+                    f"text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px'>"
+                    f"TSP difficulty</div>"
+                    f"<div style='font-size:28px;font-weight:700;color:{tsp_color};"
+                    f"line-height:1;margin-bottom:4px'>{r['tsp_difficulty']}</div>"
+                    f"<div style='font-size:13px;color:#374151'>Predicted: "
+                    f"<strong>{r['tsp_pred_text']}</strong></div>"
+                    f"<div style='background:#e5e7eb;border-radius:3px;height:5px;"
+                    f"overflow:hidden;margin-top:8px'>"
+                    f"<div style='background:{tsp_color};width:{tsp_pct}%;height:100%'>"
+                    f"</div></div></div>",
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # TSP clinical recommendation
+                st.markdown(
+                    f"<div style='background:#f8fafc;border-left:4px solid {tsp_bdr};"
+                    f"border-radius:0 6px 6px 0;padding:12px 16px'>"
+                    f"<div style='font-size:11px;font-weight:700;color:#6b7280;"
+                    f"text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px'>"
+                    f"TSP preparation guidance</div>"
+                    f"<div style='font-size:13px;color:#1c1917;line-height:1.6'>"
+                    f"{r['tsp_body']}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # TEE measurement summary table
+                st.markdown(
+                    "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:8px'>"
+                    "Measurement summary</div>",
+                    unsafe_allow_html=True,
+                )
+                rows = [
+                    ("Fossa ovalis thickness", f"{r.get('fo_val', fo_val):.1f} mm",
+                     "high" if fo_val > 3.5 else ("mod" if fo_val > 2.5 else "low"),
+                     "High risk (>3.5 mm)" if fo_val > 3.5 else ("Elevated (2.5–3.5 mm)" if fo_val > 2.5 else "Normal (<2.5 mm)")),
+                    ("Septal angle", f"{sa_val}°",
+                     "high" if sa_val > 85 else ("mod" if sa_val < 55 else "low"),
+                     "Difficult (>85°)" if sa_val > 85 else ("Steep (<55°)" if sa_val < 55 else "Normal (55–85°)")),
+                    ("Left atrial diameter", f"{la_val} mm",
+                     "high" if la_val > 50 else ("mod" if la_val > 42 else "low"),
+                     "Enlarged (>50 mm)" if la_val > 50 else ("Borderline (42–50 mm)" if la_val > 42 else "Normal (<42 mm)")),
+                ]
+                pill_css = {"low": "pill-low", "mod": "pill-mod", "high": "pill-high"}
+                for label_m, value_m, flag_m, interp_m in rows:
+                    st.markdown(
+                        f"<div class='rf-row'>"
+                        f"<span style='min-width:190px;font-size:13px'>{label_m}</span>"
+                        f"<span style='font-family:monospace;font-size:13px;font-weight:600;"
+                        f"min-width:56px'>{value_m}</span>"
+                        f"<span class='rf-pill {pill_css[flag_m]}'>{interp_m}</span>"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
 
-    # Handle Add to Day Schedule — use the inputs that produced the stored result
-    if add_sched and r is not None:
-        # Fall back to current widget values if risk_inputs was not stored
-        inp = st.session_state.risk_inputs or {
-            "physician": physician, "anatomy": anatomy, "extra_proc": extra_proc,
-            "prior": prior_ablation, "time_of_day": time_of_day,
-        }
-        label = patient_label.strip() if patient_label.strip() else f"Case {len(st.session_state.schedule) + 1}"
-        st.session_state.schedule.append({
-            "label":        label,
-            "physician":    inp["physician"],
-            "extra_proc":   inp["extra_proc"],
-            "anatomy":      inp["anatomy"],
-            "prior":        inp["prior"],
-            "time_of_day":  inp["time_of_day"],
-            "risk":         r["risk"],
-            "duration_est": r["center"],
-            "lo":           r["lo"],
-            "hi":           r["hi"],
-        })
-        st.toast(f"'{label}' added — switch to OR Day Schedule Builder to view.")
-        st.rerun()
+                # BMI flag inline if applicable
+                if r.get("bmi_flag") and r["bmi_flag"] not in ("", "Normal"):
+                    bmi_cls = "bmi-obese" if "Obese" in r["bmi_flag"] else "bmi-overweight"
+                    st.markdown(
+                        f"<div class='bmi-flag {bmi_cls}' style='margin-top:10px'>"
+                        f"BMI: <strong>{r['bmi_flag']}</strong> — "
+                        f"Prep time estimate adjusted upward. Ensure positioning support and larger-bore access."
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
 
-    # ── Calculation History ──
-    if st.session_state.calc_history:
-        st.divider()
-        h_col1, h_col2 = st.columns([6, 1])
-        h_col1.markdown("#### Calculation History")
-        if h_col2.button("Clear", key="clear_history"):
-            st.session_state.calc_history = []
-            st.rerun()
-        hist_df = pd.DataFrame(st.session_state.calc_history)
-        st.dataframe(hist_df, hide_index=True, use_container_width=True)
-        st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Anatomy factor breakdown — collapsed by default
+                with st.expander("Score breakdown by factor"):
+                    for factor, pts in r["anat_breakdown"].items():
+                        if pts == 0:
+                            continue
+                        bar_w = max(4, round(pts / 30 * 100))
+                        st.markdown(
+                            f"<div class='rf-row'>"
+                            f"<span style='min-width:200px;font-size:13px'>{factor}</span>"
+                            f"<div style='flex:1;background:#e5e7eb;border-radius:3px;"
+                            f"height:6px;overflow:hidden;margin:0 12px'>"
+                            f"<div style='background:#1a56db;width:{bar_w}%;height:100%'></div></div>"
+                            f"<span style='font-family:monospace;font-size:12px;"
+                            f"font-weight:600;min-width:52px;text-align:right'>+{pts} pts</span>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+
 
     st.markdown(
-        "<div class='box-red' style='font-size:12px'>"
-        "<b>Disclaimer:</b> Predictions are based on a small single-centre dataset. "
+        "<div class='box-red' style='font-size:12px;margin-top:16px'>"
+        "<b>Disclaimer:</b> Predictions are based on a small single-centre dataset (n=145). "
         "For educational and planning purposes only — not for clinical decision-making."
         "</div>",
         unsafe_allow_html=True,
     )
+
+    # ── Calculation history ───────────────────────────────────────────────────
+    if st.session_state.calc_history:
+        st.divider()
+        h1, h2 = st.columns([6, 1])
+        h1.markdown("#### Calculation history")
+        if h2.button("Clear", key="clear_history"):
+            st.session_state.calc_history = []
+            st.rerun()
+        st.dataframe(pd.DataFrame(st.session_state.calc_history), hide_index=True, use_container_width=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -783,32 +1294,101 @@ with tab_schedule:
     if st.session_state.pop("optimized", False):
         st.success("Schedule optimised — complex cases moved to morning block.")
 
-    # ── Section 2: Add a Case ─────────────────────────────────────────────────
+    # ── Section 2: Add a Case (quick entry fallback) ─────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("<div class='section-label'>Add a Case</div>", unsafe_allow_html=True)
     st.divider()
-    with st.expander("Add a Case to Today's Schedule",
+    st.markdown(
+        "<p style='font-size:12px;color:#6b7280;margin-bottom:8px'>"
+        "Add cases here or from the <b>Pre-Case Risk Score</b> tab using 'Add to Day Schedule'. "
+        "Both paths use the same full assessment — physician, clinical profile, TEE measurements, and BMI.</p>",
+        unsafe_allow_html=True,
+    )
+    with st.expander("Add a case to today's schedule",
                      expanded=len(st.session_state.schedule) == 0):
-        fa1, fa2, fa3 = st.columns(3)
-        with fa1:
-            add_label   = st.text_input("Patient or case label", placeholder="e.g. Pt 004", key="add_lbl")
-            add_phys    = st.selectbox("Physician", ["Dr. A", "Dr. B", "Dr. C"], key="add_phys")
-        with fa2:
-            add_prior   = st.radio("Prior ablation?", ["No", "Yes"], horizontal=True, key="add_prior")
-            add_anatomy = st.select_slider("Anatomy complexity",
-                                           options=["Simple", "Moderate", "Complex"],
-                                           value="Moderate", key="add_anat")
-        with fa3:
-            add_extra   = st.selectbox("Extra procedure?",
-                                       ["None — Standard PVI Only", "CTI Ablation",
-                                        "BOX Isolation", "SVC Isolation",
-                                        "Multiple Extra Procedures"], key="add_extra")
-            add_tod     = st.radio("Time of day", ["Morning", "Afternoon"],
-                                   horizontal=True, key="add_tod")
 
-        if st.button("Add Case", type="primary"):
-            r_add = compute_risk(add_prior, add_anatomy, add_extra, add_phys, add_tod)
-            lbl   = add_label.strip() if add_label.strip() else f"Case {len(st.session_state.schedule) + 1}"
+        # ── Scheduling ────────────────────────────────────────────────────────
+        st.markdown("<div class='section-label'>Scheduling</div>", unsafe_allow_html=True)
+        qa1, qa2, qa3, qa4 = st.columns(4)
+        add_label  = qa1.text_input("Case label", placeholder="e.g. Pt 004", key="add_lbl")
+        add_phys   = qa2.selectbox("Physician", ["Dr. A", "Dr. B", "Dr. C"], key="add_phys")
+        add_tod    = qa3.radio("Time of day", ["Morning", "Afternoon"], horizontal=True, key="add_tod")
+        add_extra  = qa4.selectbox("Extra procedure?",
+                                   ["None — Standard PVI Only", "CTI Ablation",
+                                    "BOX Isolation", "SVC Isolation",
+                                    "Multiple Extra Procedures"], key="add_extra")
+
+        # ── Clinical profile ──────────────────────────────────────────────────
+        st.markdown("<div class='section-label' style='margin-top:12px'>Clinical profile</div>", unsafe_allow_html=True)
+        qb1, qb2, qb3, qb4 = st.columns(4)
+        add_afib   = qb1.selectbox("AFib type",
+                                   ["Paroxysmal", "Persistent", "Long-Standing Persistent"],
+                                   key="add_afib")
+        add_prior  = qb2.radio("Prior ablation?", ["No", "Yes"], horizontal=True, key="add_prior")
+        add_bmi    = qb3.number_input("BMI (optional)", min_value=0.0, max_value=70.0,
+                                      value=0.0, step=0.5, key="add_bmi")
+        add_age    = qb4.number_input("Age", min_value=18, max_value=99, value=65,
+                                      step=1, key="add_age")
+        add_bmi_input = add_bmi if add_bmi > 0 else None
+
+        # ── TEE ultrasound measurements ───────────────────────────────────────
+        st.markdown("<div class='section-label' style='margin-top:12px'>TEE ultrasound measurements</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='font-size:11px;color:#6b7280;margin:-4px 0 8px'>"
+            "Leave at defaults if imaging not yet available — anatomy complexity will be used instead.</p>",
+            unsafe_allow_html=True,
+        )
+        qc1, qc2, qc3 = st.columns(3)
+        add_fo = qc1.slider("Fossa ovalis (mm)", min_value=1.0, max_value=6.0,
+                            value=2.5, step=0.1, key="add_fo",
+                            help="Normal: <2.5 mm · Elevated: 2.5–3.5 mm · High: >3.5 mm")
+        add_sa = qc2.slider("Septal angle (°)", min_value=40, max_value=110,
+                            value=70, step=1, key="add_sa",
+                            help="Normal: 55–80° · Difficult: >85°")
+        add_la = qc3.slider("Left atrial diameter (mm)", min_value=30, max_value=65,
+                            value=40, step=1, key="add_la",
+                            help="Normal: <40 mm · Borderline: 40–50 mm · Enlarged: >50 mm")
+
+        # Live TEE flags
+        pill_css = {"low":"pill-low", "mod":"pill-mod", "high":"pill-high"}
+        fo_f = "high" if add_fo > 3.5 else ("mod" if add_fo > 2.5 else "low")
+        sa_f = "high" if add_sa > 85  else ("mod" if add_sa < 55  else "low")
+        la_f = "high" if add_la > 50  else ("mod" if add_la > 42  else "low")
+        fo_t = "High risk" if add_fo > 3.5 else ("Elevated" if add_fo > 2.5 else "Normal")
+        sa_t = "Difficult" if add_sa > 85  else ("Steep"    if add_sa < 55  else "Normal")
+        la_t = "Enlarged"  if add_la > 50  else ("Borderline" if add_la > 42 else "Normal")
+        qc1.markdown(
+            f"<div style='font-size:12px;margin-top:4px'>{add_fo:.1f} mm "
+            f"<span class='rf-pill {pill_css[fo_f]}'>{fo_t}</span></div>",
+            unsafe_allow_html=True
+        )
+        qc2.markdown(
+            f"<div style='font-size:12px;margin-top:4px'>{add_sa}° "
+            f"<span class='rf-pill {pill_css[sa_f]}'>{sa_t}</span></div>",
+            unsafe_allow_html=True
+        )
+        qc3.markdown(
+            f"<div style='font-size:12px;margin-top:4px'>{add_la} mm "
+            f"<span class='rf-pill {pill_css[la_f]}'>{la_t}</span></div>",
+            unsafe_allow_html=True
+        )
+
+        # Derive anatomy from TEE (same logic as risk tab)
+        if add_fo > 3.5 or add_sa > 85:
+            add_anatomy = "Complex"
+        elif add_fo > 2.5 or add_sa > 75:
+            add_anatomy = "Moderate"
+        else:
+            add_anatomy = "Simple"
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Add to schedule", type="primary", use_container_width=True, key="btn_add_case"):
+            r_add = compute_risk(
+                add_prior, add_anatomy, add_extra, add_phys, add_tod,
+                fo=add_fo, sa=add_sa, la=add_la,
+                afib_type=add_afib, bmi=add_bmi_input, age=int(add_age)
+            )
+            lbl = add_label.strip() if add_label.strip() else f"Case {len(st.session_state.schedule) + 1}"
             st.session_state.schedule.append({
                 "label":        lbl,
                 "physician":    add_phys,
@@ -820,15 +1400,18 @@ with tab_schedule:
                 "duration_est": r_add["center"],
                 "lo":           r_add["lo"],
                 "hi":           r_add["hi"],
+                "quick_add":    False,
             })
             st.rerun()
 
     if not st.session_state.schedule:
         st.markdown(
             "<div style='text-align:center;padding:60px 20px;color:#9ca3af'>"
-            "<div style='font-size:15px;margin-top:14px'>"
-            "No cases scheduled yet. Add cases above or send them from the "
-            "Pre-Case Risk Score tab.</div></div>",
+            "<div style='font-size:32px;margin-bottom:12px'>📋</div>"
+            "<div style='font-size:15px'>No cases scheduled yet.</div>"
+            "<div style='font-size:13px;margin-top:6px'>"
+            "Go to <b>Pre-Case Risk Score</b> and click 'Add to Day Schedule' "
+            "after calculating a risk score.</div></div>",
             unsafe_allow_html=True,
         )
     else:
@@ -1018,18 +1601,18 @@ with tab_schedule:
         st.markdown("#### Case List")
 
         st.markdown('<span class="table-header-marker"></span>', unsafe_allow_html=True)
-        hcols = st.columns([2, 1.5, 1.5, 2, 1.5, 1.5, 1.1])
-        for col, hdr in zip(hcols, ["Label", "Physician", "Anatomy", "Extra Proc", "Est Duration", "Risk", ""]):
+        hcols = st.columns([2, 1.2, 1.2, 1.5, 1.5, 1.5, 1.2, 1.0])
+        for col, hdr in zip(hcols, ["Label", "Physician", "Start", "Extra Proc", "Est Duration", "Risk", "Source", ""]):
             col.markdown(f"**{hdr}**")
 
         badge_colors = {"Low": GREEN, "Medium": ORANGE, "High": RED}
-        for i, c in enumerate(cases):
+        for i, (c, t) in enumerate(zip(cases, timeline)):
             row_cls = "row-even-marker" if i % 2 == 0 else "row-odd-marker"
             st.markdown(f'<span class="{row_cls}"></span>', unsafe_allow_html=True)
-            rc = st.columns([2, 1.5, 1.5, 2, 1.5, 1.5, 1.1])
+            rc = st.columns([2, 1.2, 1.2, 1.5, 1.5, 1.5, 1.2, 1.0])
             rc[0].write(c["label"])
             rc[1].write(c["physician"])
-            rc[2].write(c["anatomy"])
+            rc[2].write(t["start"].strftime("%I:%M %p"))
             rc[3].write(c["extra_proc"].split(" — ")[0])
             rc[4].write(f"{c['lo']:.0f}–{c['hi']:.0f} min")
             badge_clr = badge_colors[c["risk"]]
@@ -1038,8 +1621,14 @@ with tab_schedule:
                 f"border-radius:12px;font-size:12px;font-weight:600'>{c['risk']}</span>",
                 unsafe_allow_html=True,
             )
-            rc[6].markdown('<span class="del-btn-marker"></span>', unsafe_allow_html=True)
-            if rc[6].button("Remove", key=f"del_{i}"):
+            source_lbl = "Schedule tab" if c.get("quick_add") is not None else "Risk tab"
+            source_clr = BLUE
+            rc[6].markdown(
+                f"<span style='font-size:11px;color:{source_clr};font-weight:500'>{source_lbl}</span>",
+                unsafe_allow_html=True,
+            )
+            rc[7].markdown('<span class="del-btn-marker"></span>', unsafe_allow_html=True)
+            if rc[7].button("✕", key=f"del_{i}"):
                 st.session_state.schedule.pop(i)
                 st.rerun()
 
@@ -1072,11 +1661,49 @@ with tab_debrief:
     col_in, col_out = st.columns([1, 1.1], gap="large")
 
     with col_in:
-        st.markdown("### Actual Case Times")
+        st.markdown("### Case Details")
 
+        db_label     = st.text_input("Case label / patient",
+                                     placeholder="e.g. Pt 001 — links to risk score history",
+                                     key="db_label",
+                                     help="Enter the same label used in the Pre-Case Risk Score tab to link this debrief to the pre-case prediction.")
         db_physician = st.selectbox("Physician", ["Dr. A", "Dr. B", "Dr. C"], key="db_phys")
         db_case_type = st.radio("Case type", ["Standard PVI", "Extra Procedure"],
                                 horizontal=True, key="db_type")
+
+        # Pull matching risk prediction from history if label matches
+        matched_prediction = None
+        if db_label.strip() and st.session_state.calc_history:
+            for h in st.session_state.calc_history:
+                if h.get("Label", "").strip().lower() == db_label.strip().lower():
+                    matched_prediction = h
+                    break
+        if matched_prediction:
+            pred_lo  = matched_prediction.get("Duration", "—").split("–")[0] if "–" in matched_prediction.get("Duration","") else "—"
+            pred_hi  = matched_prediction.get("Duration", "—").split("–")[-1].replace(" min","") if "–" in matched_prediction.get("Duration","") else "—"
+            pred_risk = matched_prediction.get("Sched. Risk", matched_prediction.get("Risk", "—"))
+            st.markdown(
+                f"<div style='background:#eff6ff;border-left:4px solid #1a56db;"
+                f"border-radius:0 6px 6px 0;padding:10px 14px;margin-bottom:10px'>"
+                f"<div style='font-size:11px;font-weight:700;color:#6b7280;"
+                f"text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px'>"
+                f"Linked pre-case prediction</div>"
+                f"<div style='font-size:13px;color:#1c1917'>"
+                f"Predicted duration: <b>{pred_lo}–{pred_hi} min</b> · "
+                f"Risk: <b>{pred_risk}</b> · "
+                f"Physician: <b>{matched_prediction.get('Physician','—')}</b></div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        elif db_label.strip():
+            st.markdown(
+                "<div style='background:#fffbeb;border-left:4px solid #f59e0b;"
+                "border-radius:0 6px 6px 0;padding:8px 14px;margin-bottom:10px;"
+                "font-size:12px;color:#374151'>"
+                "No matching pre-case calculation found for this label. "
+                "Run the risk score first and use the same label to link them.</div>",
+                unsafe_allow_html=True,
+            )
 
         phys_step_bmk = BMK["physician_steps"][db_physician]
         phys_n_cases  = BMK["physician"][db_physician]["n"]
@@ -1173,6 +1800,30 @@ with tab_debrief:
                 f"</div>",
                 unsafe_allow_html=True,
             )
+
+            # Predicted vs actual panel (only shown if label matched a calculation)
+            if matched_prediction:
+                try:
+                    dur_str  = matched_prediction.get("Duration", "")
+                    p_lo_val = float(dur_str.split("–")[0]) if "–" in dur_str else None
+                    p_hi_val = float(dur_str.split("–")[-1].replace(" min","")) if "–" in dur_str else None
+                    p_mid    = (p_lo_val + p_hi_val) / 2 if p_lo_val and p_hi_val else None
+                    if p_mid:
+                        diff     = actual_total - p_mid
+                        in_range = p_lo_val <= actual_total <= p_hi_val if p_lo_val and p_hi_val else False
+                        diff_cls = "box-green" if in_range else ("box-yellow" if abs(diff) <= 15 else "box-red")
+                        diff_lbl = "Within predicted range" if in_range else ("Close to predicted range" if abs(diff) <= 15 else "Outside predicted range")
+                        st.markdown(
+                            f"<div class='{diff_cls}'>"
+                            f"<b>Model accuracy — {diff_lbl}</b><br>"
+                            f"Predicted: {p_lo_val:.0f}–{p_hi_val:.0f} min · "
+                            f"Actual: {actual_total:.0f} min · "
+                            f"Difference vs midpoint: {'+' if diff >= 0 else ''}{diff:.0f} min"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                except Exception:
+                    pass
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1279,23 +1930,303 @@ with tab_debrief:
                     )
 
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("**Flagged Delays**")
+            st.markdown(
+                "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:8px'>"
+                "Delay flags recorded this case</div>",
+                unsafe_allow_html=True,
+            )
             if delay_checked:
                 badges = " ".join(
-                    f"<span style='background:#ef4444;color:white;padding:3px 10px;"
-                    f"border-radius:12px;font-size:12px;font-weight:500;"
+                    f"<span style='background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;"
+                    f"padding:4px 12px;border-radius:12px;font-size:12px;font-weight:500;"
                     f"display:inline-block;margin:3px 4px 3px 0'>{flag}</span>"
                     for flag in delay_checked
                 )
                 st.markdown(badges, unsafe_allow_html=True)
+
+                # Save to running tally in session state
+                if "delay_tally" not in st.session_state:
+                    st.session_state.delay_tally = {}
+                for flag in delay_checked:
+                    st.session_state.delay_tally[flag] = st.session_state.delay_tally.get(flag, 0) + 1
             else:
                 st.markdown(
                     "<div class='box-green'>No delays reported for this case.</div>",
                     unsafe_allow_html=True,
                 )
 
+            # Running delay tally across all debriefs this session
+            if st.session_state.get("delay_tally"):
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown(
+                    "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:8px'>"
+                    "Delay frequency — all cases this session</div>",
+                    unsafe_allow_html=True,
+                )
+                tally = st.session_state.delay_tally
+                max_count = max(tally.values())
+                for flag, count in sorted(tally.items(), key=lambda x: -x[1]):
+                    bar_w = max(4, round(count / max_count * 100))
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:10px;"
+                        f"margin-bottom:6px;font-size:12px'>"
+                        f"<span style='min-width:280px;color:#374151'>{flag}</span>"
+                        f"<div style='flex:1;background:#e5e7eb;border-radius:3px;"
+                        f"height:8px;overflow:hidden'>"
+                        f"<div style='background:#ef4444;width:{bar_w}%;height:100%'></div></div>"
+                        f"<span style='min-width:24px;text-align:right;font-family:monospace;"
+                        f"font-size:12px;font-weight:600;color:#374151'>{count}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                if st.button("Reset delay tally", key="reset_tally"):
+                    st.session_state.delay_tally = {}
+                    st.rerun()
+
             if db_notes.strip():
+                st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown(
                     f"<div class='box-blue'><b>Case Notes:</b> {db_notes}</div>",
                     unsafe_allow_html=True,
                 )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 4 — AUDIO INSIGHTS (PROTOTYPE / MOCKUP)
+# This tab is a research prototype showing what passive audio analysis of the
+# EP Lab could produce. All data shown is simulated — no real audio has been
+# collected or processed. It demonstrates the proposed method from Part 2.
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_audio:
+    st.markdown("<div class='page-title'>Audio Insights</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='page-subtitle'>"
+        "This is a <b>research prototype</b> demonstrating what passive audio analysis of the EP Lab "
+        "could produce. Consent-based ambient microphones with automated speaker diarization would "
+        "identify communication patterns, flag confirmation loops, and correlate speech density with "
+        "step delays — capturing the unobserved factors missing from the timestamp dataset."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div class='box-orange' style='font-size:13px;margin-bottom:20px'>"
+        "<b>Prototype notice:</b> All data on this tab is simulated for demonstration purposes. "
+        "No real audio has been recorded or processed. This shows what the dashboard would look like "
+        "once the audio pipeline described in Part 2 of the proposal is implemented."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<hr style='border:none;border-top:1.5px solid #0d1b2a;margin:0 0 22px 0'>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Simulated bar chart data ──────────────────────────────────────────────
+    # t: "n" = normal, "f" = communication spike, "a" = confirmation loop
+    # Aligned to a ~45-min case with 24 time buckets (~2 min each)
+    BAR_DATA = [
+        # PT prep (quiet)
+        {"h": 14, "t": "n", "phase": "PT prep"},
+        {"h": 18, "t": "n", "phase": "PT prep"},
+        {"h": 20, "t": "n", "phase": "PT prep"},
+        # TSP (spike — difficult crossing)
+        {"h": 62, "t": "f", "phase": "TSP"},
+        {"h": 58, "t": "f", "phase": "TSP"},
+        {"h": 30, "t": "n", "phase": "TSP"},
+        # Pre-map (quiet — smooth)
+        {"h": 16, "t": "n", "phase": "Pre-map"},
+        {"h": 14, "t": "n", "phase": "Pre-map"},
+        # Ablation — confirmation loops
+        {"h": 22, "t": "n", "phase": "Ablation"},
+        {"h": 24, "t": "n", "phase": "Ablation"},
+        {"h": 85, "t": "a", "phase": "Ablation"},
+        {"h": 68, "t": "f", "phase": "Ablation"},
+        {"h": 28, "t": "n", "phase": "Ablation"},
+        {"h": 92, "t": "a", "phase": "Ablation"},
+        {"h": 72, "t": "f", "phase": "Ablation"},
+        {"h": 26, "t": "n", "phase": "Ablation"},
+        {"h": 30, "t": "n", "phase": "Ablation"},
+        # Verification (moderate)
+        {"h": 38, "t": "f", "phase": "Verification"},
+        {"h": 22, "t": "n", "phase": "Verification"},
+        # Catheter removal (quiet)
+        {"h": 16, "t": "n", "phase": "Cath removal"},
+        {"h": 14, "t": "n", "phase": "Cath removal"},
+        # Post-care (very quiet)
+        {"h": 12, "t": "n", "phase": "Post-care"},
+        {"h": 10, "t": "n", "phase": "Post-care"},
+        {"h": 15, "t": "n", "phase": "Post-care"},
+    ]
+
+    col_left, col_right = st.columns(2, gap="large")
+
+    # ── LEFT COLUMN: Current case view ───────────────────────────────────────
+    with col_left:
+
+        # ── Speech density chart ──────────────────────────────────────────────
+        st.markdown(
+            "<div style='font-size:11px;font-weight:700;color:#6b7280;"
+            "text-transform:uppercase;letter-spacing:.08em;"
+            "border-bottom:2px solid #e5e7eb;padding-bottom:5px;margin-bottom:12px'>"
+            "Single-case view — simulated case (Dr. B · 09:14 start)</div>",
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            st.markdown(
+                "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:4px'>"
+                "Speech density over case timeline</div>"
+                "<div style='font-size:11px;color:#6b7280;margin-bottom:10px'>"
+                "Each bar = ~2 min window · colour = detected pattern</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Build SVG bar chart
+            n       = len(BAR_DATA)
+            max_h   = max(b["h"] for b in BAR_DATA)
+            chart_h = 80
+            bar_w   = 100 / n
+            COLOR   = {"n": "#93c5fd", "f": "#f59e0b", "a": "#ef4444"}
+
+            bars_svg = ""
+            for i, b in enumerate(BAR_DATA):
+                bar_h   = max(4, round(b["h"] / max_h * chart_h))
+                x       = i * bar_w
+                y       = chart_h - bar_h
+                c       = COLOR[b["t"]]
+                bars_svg += (
+                    f'<rect x="{x:.1f}%" y="{y}" width="{bar_w - 0.5:.1f}%"'
+                    f' height="{bar_h}" fill="{c}" rx="2"/>'
+                )
+
+            st.markdown(
+                f"<svg width='100%' height='{chart_h}' style='display:block;margin-bottom:6px'>"
+                f"{bars_svg}</svg>",
+                unsafe_allow_html=True,
+            )
+
+            # Legend
+            st.markdown(
+                "<div style='display:flex;gap:16px;font-size:11px;color:#6b7280;margin-bottom:16px'>"
+                "<span style='display:flex;align-items:center;gap:5px'>"
+                "<span style='width:10px;height:10px;background:#93c5fd;border-radius:2px'></span>Normal</span>"
+                "<span style='display:flex;align-items:center;gap:5px'>"
+                "<span style='width:10px;height:10px;background:#f59e0b;border-radius:2px'></span>Communication spike</span>"
+                "<span style='display:flex;align-items:center;gap:5px'>"
+                "<span style='width:10px;height:10px;background:#ef4444;border-radius:2px'></span>Confirmation loop</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Event timeline
+            st.markdown(
+                "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:10px'>"
+                "Flagged events — this case</div>",
+                unsafe_allow_html=True,
+            )
+
+            events = [
+                ("09:21 · TSP phase",      "f",
+                 "Communication spike — 4 speaker turns in 45s",
+                 "Likely: catheter positioning discussion or equipment adjustment."),
+                ("09:38 · Ablation start", "n",
+                 "Ablation phase initiated — normal communication",
+                 "LSPV targeted first. Team coordination clear and efficient."),
+                ("09:47 · Ablation",       "a",
+                 "Confirmation loop — 'ready for energy?' repeated ×3",
+                 "Repeated in 2 min window. Flagged for post-case debrief. "
+                 "Cases with 3+ loops avg +8 min ablation time."),
+                ("09:54 · Ablation",       "a",
+                 "Second confirmation loop detected",
+                 "'Confirm isolation' exchange ×2. Possible unclear readiness cue — "
+                 "candidate for standardised verbal protocol."),
+                ("10:05 · Verification",   "f",
+                 "Communication spike — isolation confirmation exchange",
+                 "Expected at this phase. Normal verification dialogue."),
+            ]
+
+            ev_color = {"n": GREEN, "f": ORANGE, "a": RED}
+            ev_bg    = {"n": "#f0fdf4", "f": "#fffbeb", "a": "#fef2f2"}
+
+            for time_str, sev, title, body in events:
+                st.markdown(
+                    f"<div style='border-left:3px solid {ev_color[sev]};"
+                    f"background:{ev_bg[sev]};border-radius:0 6px 6px 0;"
+                    f"padding:8px 12px;margin-bottom:8px'>"
+                    f"<div style='font-size:10px;font-weight:700;color:#6b7280;"
+                    f"text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px'>{time_str}</div>"
+                    f"<div style='font-size:13px;font-weight:600;color:#1c1917;margin-bottom:3px'>{title}</div>"
+                    f"<div style='font-size:12px;color:#374151;line-height:1.5'>{body}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── RIGHT COLUMN: Aggregate insights ────────────────────────────────────
+    with col_right:
+
+        # ── Spikes per phase ──────────────────────────────────────────────────
+        st.markdown(
+            "<div style='font-size:11px;font-weight:700;color:#6b7280;"
+            "text-transform:uppercase;letter-spacing:.08em;"
+            "border-bottom:2px solid #e5e7eb;padding-bottom:5px;margin-bottom:12px'>"
+            "Aggregate view — simulated 30-case sample</div>",
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            st.markdown(
+                "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:12px'>"
+                "Avg communication spikes per procedure phase</div>",
+                unsafe_allow_html=True,
+            )
+
+            phase_data = [
+                ("PT prep / intubation", 0.4,  17, BLUE),
+                ("TSP",                  1.8,  60, ORANGE),
+                ("Pre-ablation mapping", 0.6,  22, BLUE),
+                ("Ablation",             2.4,  85, RED),
+                ("Verification",         1.0,  38, ORANGE),
+                ("Post-care",            0.3,  12, BLUE),
+            ]
+
+            for phase, rate, pct, color in phase_data:
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;gap:10px;"
+                    f"margin-bottom:8px;font-size:12px'>"
+                    f"<span style='min-width:190px;color:#374151'>{phase}</span>"
+                    f"<div style='flex:1;background:#e5e7eb;border-radius:3px;height:8px;overflow:hidden'>"
+                    f"<div style='background:{color};width:{pct}%;height:100%'></div></div>"
+                    f"<span style='min-width:64px;text-align:right;font-family:monospace;"
+                    f"font-size:11px;color:#6b7280'>{rate:.1f} / case</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # Key findings
+            findings = [
+                (RED,    "Confirmation loops → +8 min ablation time",
+                 "Cases with 3+ repeated 'ready for energy' exchanges averaged "
+                 "29 min ablation vs 21 min baseline (from dataset). A standardised "
+                 "verbal cue protocol is the proposed intervention."),
+                (ORANGE, "TSP audio spikes predict difficult puncture",
+                 "Communication spikes during TSP were 3.2× more likely in cases "
+                 "where TSP exceeded 10 min — detectable ~90s before the duration "
+                 "threshold is crossed. Could trigger an early alert."),
+                (GREEN,  "Low-speech cases are the fastest",
+                 "Bottom quartile of speech events per case averaged 31 min case time "
+                 "vs 47 min for top quartile — consistent with implicit team coordination "
+                 "in experienced pairings (Dr. A pattern)."),
+            ]
+
+            for color, title, body in findings:
+                bg  = "#fef2f2" if color == RED else ("#fffbeb" if color == ORANGE else "#f0fdf4")
+                st.markdown(
+                    f"<div style='background:{bg};border-left:4px solid {color};"
+                    f"border-radius:0 6px 6px 0;padding:10px 14px;margin-bottom:10px'>"
+                    f"<div style='font-size:12px;font-weight:700;color:{color};"
+                    f"margin-bottom:4px'>{title}</div>"
+                    f"<div style='font-size:12px;color:#374151;line-height:1.6'>{body}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
