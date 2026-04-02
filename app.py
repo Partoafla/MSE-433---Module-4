@@ -730,8 +730,8 @@ def duration_gauge(predicted: float, lo: float, hi: float) -> go.Figure:
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab_risk, tab_schedule, tab_debrief, tab_audio = st.tabs([
-    "Pre-Case Risk Score", "OR Day Schedule Builder", "Post-Case Debrief", "Audio Insights ✦ Prototype"
+tab_risk, tab_schedule, tab_debrief = st.tabs([
+    "Pre-Case Risk Score", "OR Day Schedule Builder", "Post-Case Debrief"
 ])
 
 
@@ -1110,12 +1110,12 @@ with tab_risk:
                     f"border-radius:8px;padding:14px 16px;height:100%'>"
                     f"<div style='font-size:11px;font-weight:700;color:#6b7280;"
                     f"text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px'>"
-                    f"Anatomical risk score</div>"
+                    f"Anatomical complexity score</div>"
                     f"<div style='font-size:40px;font-weight:700;color:{anat_color};"
                     f"line-height:1;margin-bottom:4px'>{r['anatomy_score']}"
                     f"<span style='font-size:18px;font-weight:400;color:#6b7280'> / 100</span></div>"
                     f"<div style='font-size:13px;font-weight:600;color:{anat_color}'>"
-                    f"{r['anatomy_level']} anatomical risk</div>"
+                    f"{r['anatomy_level']} anatomical complexity</div>"
                     f"<div style='background:#e5e7eb;border-radius:3px;height:5px;"
                     f"overflow:hidden;margin-top:8px'>"
                     f"<div style='background:{anat_color};width:{r['anatomy_score']}%;height:100%'>"
@@ -1990,243 +1990,4 @@ with tab_debrief:
                     unsafe_allow_html=True,
                 )
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PAGE 4 — AUDIO INSIGHTS (PROTOTYPE / MOCKUP)
-# This tab is a research prototype showing what passive audio analysis of the
-# EP Lab could produce. All data shown is simulated — no real audio has been
-# collected or processed. It demonstrates the proposed method from Part 2.
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_audio:
-    st.markdown("<div class='page-title'>Audio Insights</div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='page-subtitle'>"
-        "This is a <b>research prototype</b> demonstrating what passive audio analysis of the EP Lab "
-        "could produce. Consent-based ambient microphones with automated speaker diarization would "
-        "identify communication patterns, flag confirmation loops, and correlate speech density with "
-        "step delays — capturing the unobserved factors missing from the timestamp dataset."
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<div class='box-orange' style='font-size:13px;margin-bottom:20px'>"
-        "<b>Prototype notice:</b> All data on this tab is simulated for demonstration purposes. "
-        "No real audio has been recorded or processed. This shows what the dashboard would look like "
-        "once the audio pipeline described in Part 2 of the proposal is implemented."
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<hr style='border:none;border-top:1.5px solid #0d1b2a;margin:0 0 22px 0'>",
-        unsafe_allow_html=True,
-    )
-
-    # ── Simulated bar chart data ──────────────────────────────────────────────
-    # t: "n" = normal, "f" = communication spike, "a" = confirmation loop
-    # Aligned to a ~45-min case with 24 time buckets (~2 min each)
-    BAR_DATA = [
-        # PT prep (quiet)
-        {"h": 14, "t": "n", "phase": "PT prep"},
-        {"h": 18, "t": "n", "phase": "PT prep"},
-        {"h": 20, "t": "n", "phase": "PT prep"},
-        # TSP (spike — difficult crossing)
-        {"h": 62, "t": "f", "phase": "TSP"},
-        {"h": 58, "t": "f", "phase": "TSP"},
-        {"h": 30, "t": "n", "phase": "TSP"},
-        # Pre-map (quiet — smooth)
-        {"h": 16, "t": "n", "phase": "Pre-map"},
-        {"h": 14, "t": "n", "phase": "Pre-map"},
-        # Ablation — confirmation loops
-        {"h": 22, "t": "n", "phase": "Ablation"},
-        {"h": 24, "t": "n", "phase": "Ablation"},
-        {"h": 85, "t": "a", "phase": "Ablation"},
-        {"h": 68, "t": "f", "phase": "Ablation"},
-        {"h": 28, "t": "n", "phase": "Ablation"},
-        {"h": 92, "t": "a", "phase": "Ablation"},
-        {"h": 72, "t": "f", "phase": "Ablation"},
-        {"h": 26, "t": "n", "phase": "Ablation"},
-        {"h": 30, "t": "n", "phase": "Ablation"},
-        # Verification (moderate)
-        {"h": 38, "t": "f", "phase": "Verification"},
-        {"h": 22, "t": "n", "phase": "Verification"},
-        # Catheter removal (quiet)
-        {"h": 16, "t": "n", "phase": "Cath removal"},
-        {"h": 14, "t": "n", "phase": "Cath removal"},
-        # Post-care (very quiet)
-        {"h": 12, "t": "n", "phase": "Post-care"},
-        {"h": 10, "t": "n", "phase": "Post-care"},
-        {"h": 15, "t": "n", "phase": "Post-care"},
-    ]
-
-    col_left, col_right = st.columns(2, gap="large")
-
-    # ── LEFT COLUMN: Current case view ───────────────────────────────────────
-    with col_left:
-
-        # ── Speech density chart ──────────────────────────────────────────────
-        st.markdown(
-            "<div style='font-size:11px;font-weight:700;color:#6b7280;"
-            "text-transform:uppercase;letter-spacing:.08em;"
-            "border-bottom:2px solid #e5e7eb;padding-bottom:5px;margin-bottom:12px'>"
-            "Single-case view — simulated case (Dr. B · 09:14 start)</div>",
-            unsafe_allow_html=True,
-        )
-        with st.container(border=True):
-            st.markdown(
-                "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:4px'>"
-                "Speech density over case timeline</div>"
-                "<div style='font-size:11px;color:#6b7280;margin-bottom:10px'>"
-                "Each bar = ~2 min window · colour = detected pattern</div>",
-                unsafe_allow_html=True,
-            )
-
-            # Build SVG bar chart
-            n       = len(BAR_DATA)
-            max_h   = max(b["h"] for b in BAR_DATA)
-            chart_h = 80
-            bar_w   = 100 / n
-            COLOR   = {"n": "#93c5fd", "f": "#f59e0b", "a": "#ef4444"}
-
-            bars_svg = ""
-            for i, b in enumerate(BAR_DATA):
-                bar_h   = max(4, round(b["h"] / max_h * chart_h))
-                x       = i * bar_w
-                y       = chart_h - bar_h
-                c       = COLOR[b["t"]]
-                bars_svg += (
-                    f'<rect x="{x:.1f}%" y="{y}" width="{bar_w - 0.5:.1f}%"'
-                    f' height="{bar_h}" fill="{c}" rx="2"/>'
-                )
-
-            st.markdown(
-                f"<svg width='100%' height='{chart_h}' style='display:block;margin-bottom:6px'>"
-                f"{bars_svg}</svg>",
-                unsafe_allow_html=True,
-            )
-
-            # Legend
-            st.markdown(
-                "<div style='display:flex;gap:16px;font-size:11px;color:#6b7280;margin-bottom:16px'>"
-                "<span style='display:flex;align-items:center;gap:5px'>"
-                "<span style='width:10px;height:10px;background:#93c5fd;border-radius:2px'></span>Normal</span>"
-                "<span style='display:flex;align-items:center;gap:5px'>"
-                "<span style='width:10px;height:10px;background:#f59e0b;border-radius:2px'></span>Communication spike</span>"
-                "<span style='display:flex;align-items:center;gap:5px'>"
-                "<span style='width:10px;height:10px;background:#ef4444;border-radius:2px'></span>Confirmation loop</span>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-            # Event timeline
-            st.markdown(
-                "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:10px'>"
-                "Flagged events — this case</div>",
-                unsafe_allow_html=True,
-            )
-
-            events = [
-                ("09:21 · TSP phase",      "f",
-                 "Communication spike — 4 speaker turns in 45s",
-                 "Likely: catheter positioning discussion or equipment adjustment."),
-                ("09:38 · Ablation start", "n",
-                 "Ablation phase initiated — normal communication",
-                 "LSPV targeted first. Team coordination clear and efficient."),
-                ("09:47 · Ablation",       "a",
-                 "Confirmation loop — 'ready for energy?' repeated ×3",
-                 "Repeated in 2 min window. Flagged for post-case debrief. "
-                 "Cases with 3+ loops avg +8 min ablation time."),
-                ("09:54 · Ablation",       "a",
-                 "Second confirmation loop detected",
-                 "'Confirm isolation' exchange ×2. Possible unclear readiness cue — "
-                 "candidate for standardised verbal protocol."),
-                ("10:05 · Verification",   "f",
-                 "Communication spike — isolation confirmation exchange",
-                 "Expected at this phase. Normal verification dialogue."),
-            ]
-
-            ev_color = {"n": GREEN, "f": ORANGE, "a": RED}
-            ev_bg    = {"n": "#f0fdf4", "f": "#fffbeb", "a": "#fef2f2"}
-
-            for time_str, sev, title, body in events:
-                st.markdown(
-                    f"<div style='border-left:3px solid {ev_color[sev]};"
-                    f"background:{ev_bg[sev]};border-radius:0 6px 6px 0;"
-                    f"padding:8px 12px;margin-bottom:8px'>"
-                    f"<div style='font-size:10px;font-weight:700;color:#6b7280;"
-                    f"text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px'>{time_str}</div>"
-                    f"<div style='font-size:13px;font-weight:600;color:#1c1917;margin-bottom:3px'>{title}</div>"
-                    f"<div style='font-size:12px;color:#374151;line-height:1.5'>{body}</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-
-    # ── RIGHT COLUMN: Aggregate insights ────────────────────────────────────
-    with col_right:
-
-        # ── Spikes per phase ──────────────────────────────────────────────────
-        st.markdown(
-            "<div style='font-size:11px;font-weight:700;color:#6b7280;"
-            "text-transform:uppercase;letter-spacing:.08em;"
-            "border-bottom:2px solid #e5e7eb;padding-bottom:5px;margin-bottom:12px'>"
-            "Aggregate view — simulated 30-case sample</div>",
-            unsafe_allow_html=True,
-        )
-        with st.container(border=True):
-            st.markdown(
-                "<div style='font-size:12px;font-weight:600;color:#374151;margin-bottom:12px'>"
-                "Avg communication spikes per procedure phase</div>",
-                unsafe_allow_html=True,
-            )
-
-            phase_data = [
-                ("PT prep / intubation", 0.4,  17, BLUE),
-                ("TSP",                  1.8,  60, ORANGE),
-                ("Pre-ablation mapping", 0.6,  22, BLUE),
-                ("Ablation",             2.4,  85, RED),
-                ("Verification",         1.0,  38, ORANGE),
-                ("Post-care",            0.3,  12, BLUE),
-            ]
-
-            for phase, rate, pct, color in phase_data:
-                st.markdown(
-                    f"<div style='display:flex;align-items:center;gap:10px;"
-                    f"margin-bottom:8px;font-size:12px'>"
-                    f"<span style='min-width:190px;color:#374151'>{phase}</span>"
-                    f"<div style='flex:1;background:#e5e7eb;border-radius:3px;height:8px;overflow:hidden'>"
-                    f"<div style='background:{color};width:{pct}%;height:100%'></div></div>"
-                    f"<span style='min-width:64px;text-align:right;font-family:monospace;"
-                    f"font-size:11px;color:#6b7280'>{rate:.1f} / case</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            # Key findings
-            findings = [
-                (RED,    "Confirmation loops → +8 min ablation time",
-                 "Cases with 3+ repeated 'ready for energy' exchanges averaged "
-                 "29 min ablation vs 21 min baseline (from dataset). A standardised "
-                 "verbal cue protocol is the proposed intervention."),
-                (ORANGE, "TSP audio spikes predict difficult puncture",
-                 "Communication spikes during TSP were 3.2× more likely in cases "
-                 "where TSP exceeded 10 min — detectable ~90s before the duration "
-                 "threshold is crossed. Could trigger an early alert."),
-                (GREEN,  "Low-speech cases are the fastest",
-                 "Bottom quartile of speech events per case averaged 31 min case time "
-                 "vs 47 min for top quartile — consistent with implicit team coordination "
-                 "in experienced pairings (Dr. A pattern)."),
-            ]
-
-            for color, title, body in findings:
-                bg  = "#fef2f2" if color == RED else ("#fffbeb" if color == ORANGE else "#f0fdf4")
-                st.markdown(
-                    f"<div style='background:{bg};border-left:4px solid {color};"
-                    f"border-radius:0 6px 6px 0;padding:10px 14px;margin-bottom:10px'>"
-                    f"<div style='font-size:12px;font-weight:700;color:{color};"
-                    f"margin-bottom:4px'>{title}</div>"
-                    f"<div style='font-size:12px;color:#374151;line-height:1.6'>{body}</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
 
